@@ -1,3 +1,9 @@
 ---
-alwaysApply: true
+description: Python, FastAPI, and SQLAlchemy database rules.
+globs: backend/**/*.py
 ---
+# Tenant Isolation (CRITICAL)
+Every request must enforce PostgreSQL Row-Level Security (RLS).
+Do NOT implement tenant isolation in the application layer (e.g., `query.filter(company_id=X)`). 
+You must use a session-scoped hook to set the database context:
+`SET LOCAL app.current_tenant = :tenant_id`

@@ -1,3 +1,10 @@
 ---
+description: Universal security and compliance rules for the B2B finance app.
+globs: *
 alwaysApply: true
 ---
+# Security & Compliance
+1. ZERO-TRUST: Assume all input is malicious. Use parameterized queries.
+2. NO RAW PANs: Never store raw credit card numbers. Use network tokens.
+3. AUDIT LOGGING: Any change to a budget, limit, or card status MUST be recorded in an immutable audit table.
+4. DEPENDENCIES: Never add a new third-party package without explicitly asking the user first (due to supply chain risks).
