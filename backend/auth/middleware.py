@@ -1,10 +1,15 @@
-"""Authentication middleware: verifies Clerk session tokens and extracts company_id.
+"""Authentication middleware: verifies Clerk session tokens and resolves the
+user's Thesa identity from the database.
 
-Uses Clerk's backend SDK to verify the bearer token against our Clerk instance.
-On success, request.state.company_id is set from the session's public metadata.
+The Clerk SDK verifies the bearer token; the tenant (company_id) and role are
+then looked up from the `users` table via the SECURITY DEFINER `resolve_user`
+function — JWT public metadata is no longer trusted for tenancy, so membership
+changes take effect immediately.
+
+Users authenticated with Clerk but not yet linked to a company may only reach
+the onboarding endpoint.
 """
 
-import uuid
 from typing import Callable
 
 import httpx
@@ -12,12 +17,17 @@ from clerk_backend_api import Clerk
 from clerk_backend_api.security.types import AuthenticateRequestOptions
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from backend.config import get_settings
+from backend.db.session import get_session_factory
 
 _PUBLIC_PATHS: set[str] = {"/health", "/docs", "/openapi.json", "/redoc"}
+
+# Paths reachable by an authenticated Clerk user who has no company yet.
+_ONBOARDING_PATHS: set[str] = {"/onboarding"}
 
 
 def _to_httpx_request(request: Request) -> httpx.Request:
@@ -30,16 +40,20 @@ def _to_httpx_request(request: Request) -> httpx.Request:
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Clerk-based session verification middleware.
+    """Clerk-based session verification with database-backed tenancy.
 
-    Rejects any request (outside _PUBLIC_PATHS) that does not carry a valid
-    Clerk session token with a company_id in the user's public metadata.
+    On success, request.state carries:
+        clerk_user_id  Clerk subject (always set)
+        user_id        Thesa user UUID (None until onboarded)
+        company_id     tenant UUID (None until onboarded)
+        role           owner | office_manager | crew_lead (None until onboarded)
     """
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
         settings = get_settings()
         self._clerk = Clerk(bearer_auth=settings.clerk_secret_key)
+        self._settings = settings
 
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Response]
@@ -68,31 +82,55 @@ class AuthMiddleware(BaseHTTPMiddleware):
         )
 
         if not request_state.is_signed_in:
-            reason = str(request_state.reason) if request_state.reason else "Authentication failed"
-            return JSONResponse(
-                status_code=401,
-                content={"detail": reason},
+            reason = (
+                str(request_state.reason)
+                if request_state.reason
+                else "Authentication failed"
             )
+            return JSONResponse(status_code=401, content={"detail": reason})
 
         payload = request_state.payload or {}
-        public_metadata = payload.get("public_metadata", {})
-        company_id = public_metadata.get("company_id")
-
-        if not company_id:
+        clerk_user_id = payload.get("sub")
+        if not clerk_user_id:
             return JSONResponse(
-                status_code=403,
-                content={"detail": "No company_id in session public metadata"},
+                status_code=401,
+                content={"detail": "Token has no subject claim"},
             )
 
-        try:
-            company_uuid = uuid.UUID(company_id)
-        except (ValueError, AttributeError):
+        identity = await self._resolve_user(clerk_user_id)
+
+        request.state.clerk_user_id = clerk_user_id
+
+        if identity is None:
+            if request.url.path in _ONBOARDING_PATHS:
+                request.state.user_id = None
+                request.state.company_id = None
+                request.state.role = None
+                return await call_next(request)
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Invalid company_id format in metadata"},
+                content={
+                    "detail": "User is not a member of any company; "
+                    "complete onboarding first"
+                },
             )
 
-        request.state.company_id = str(company_uuid)
-        request.state.user_id = payload.get("sub")
+        request.state.user_id = str(identity["user_id"])
+        request.state.company_id = str(identity["company_id"])
+        request.state.role = identity["role"]
 
         return await call_next(request)
+
+    async def _resolve_user(self, clerk_user_id: str) -> dict | None:
+        """Look up the Thesa user for a Clerk subject (parameterized)."""
+        factory = get_session_factory(self._settings)
+        async with factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT user_id, company_id, role, email "
+                    "FROM resolve_user(:clerk_user_id)"
+                ),
+                {"clerk_user_id": clerk_user_id},
+            )
+            row = result.mappings().first()
+            return dict(row) if row else None

@@ -1,14 +1,15 @@
 """Database session management with RLS tenant context.
 
-Every session executes `SET LOCAL app.current_tenant = :tenant_id` before
-yielding, ensuring PostgreSQL Row-Level Security policies can evaluate the
-current tenant without any application-layer filtering.
+Every tenant session executes `SET LOCAL app.current_tenant = :tenant_id`
+(and `app.current_user` for audit-trigger attribution) before yielding,
+ensuring PostgreSQL Row-Level Security policies can evaluate the current
+tenant without any application-layer filtering.
 """
 
 from collections.abc import AsyncGenerator
 
 from fastapi import Depends, Request
-from sqlalchemy import event, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -33,7 +34,7 @@ def _get_engine(settings: Settings):
     return _engine
 
 
-def _get_session_factory(settings: Settings) -> async_sessionmaker[AsyncSession]:
+def get_session_factory(settings: Settings) -> async_sessionmaker[AsyncSession]:
     global _session_factory
     if _session_factory is None:
         engine = _get_engine(settings)
@@ -49,16 +50,52 @@ async def get_tenant_session(
 ) -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency that provides a tenant-scoped database session.
 
-    Sets the PostgreSQL session variable `app.current_tenant` so that RLS
-    policies can enforce row-level isolation without application-layer filters.
+    Sets `app.current_tenant` (consumed by RLS policies) and
+    `app.current_user` (consumed by audit triggers for actor attribution).
+    Commits on success, rolls back on exception. `SET LOCAL` is scoped to the
+    transaction, so the variables vanish when it ends — fail-closed.
     """
     company_id: str = request.state.company_id
+    user_id: str | None = getattr(request.state, "user_id", None)
 
-    factory = _get_session_factory(settings)
+    factory = get_session_factory(settings)
     async with factory() as session:
+        # set_config(..., true) == SET LOCAL, but accepts bind parameters
+        # (SET LOCAL itself only takes literals).
         await session.execute(
-            text("SET LOCAL app.current_tenant = :tenant_id"),
+            text("SELECT set_config('app.current_tenant', :tenant_id, true)"),
             {"tenant_id": company_id},
         )
+        if user_id is not None:
+            await session.execute(
+                text("SELECT set_config('app.current_user', :user_id, true)"),
+                {"user_id": str(user_id)},
+            )
 
-        yield session
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        else:
+            await session.commit()
+
+
+async def get_plain_session(
+    settings: Settings = Depends(get_settings),
+) -> AsyncGenerator[AsyncSession, None]:
+    """Session without tenant context, for the onboarding path only.
+
+    RLS policies fail closed with no tenant set, so this session can read
+    nothing from tenant tables directly; onboarding goes through the
+    SECURITY DEFINER `create_company_with_owner` function.
+    """
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        else:
+            await session.commit()

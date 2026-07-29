@@ -1,13 +1,21 @@
 # Thesa
 
-A B2B expense management platform with JIT card funding, automated receipt parsing, and database-enforced tenant isolation.
+A rewards-neutral spend management platform for field workforces — construction crews, home services, restaurants, film production, and trucking. Employees get scoped virtual cards in seconds at the point of sale; finance teams get spend routed across **all** their corporate cards for maximum rewards, not locked into one issuer's interchange.
+
+## Why Thesa
+
+Incumbent spend platforms (Ramp, Brex) monetize interchange on their own card — so they will never tell you to put your fuel spend on the card that earns 4x on gas. Thesa is issuer-neutral:
+
+1. **Reward Router** (flagship) — analyzes recurring vendor spend and routes each purchase to whichever of the company's cards earns the highest multiplier. We charge a percentage of the rewards value we create, not interchange.
+2. **Built for the field, not the desk** — the primary user is a crew lead at a merchant counter, not a finance manager at a dashboard. Scoped card issuance, per diem tracking, and receipt capture are all mobile-first.
+3. **Database-enforced tenant isolation** — PostgreSQL Row-Level Security means the database is physically blind to other tenants' data.
 
 ## Architecture
 
 | Layer | Stack |
 |---|---|
 | **Command Center** (Web) | React / Next.js |
-| **Point-of-Sale Client** (Mobile) | Swift (iOS) |
+| **Field Client** (Mobile) | Swift (iOS) |
 | **Backend API** | Python / FastAPI |
 | **Database** | PostgreSQL with Row-Level Security |
 | **Card Issuing** | Marqeta (JIT funding) |
@@ -25,49 +33,56 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 
 ## What's Built
 
-- [x] **FastAPI server** — app entry point with health check and example authenticated endpoint
-- [x] **Clerk authentication middleware** — verifies session tokens via `clerk-backend-api`, extracts `company_id` from public metadata, rejects unauthenticated/unauthorized requests
-- [x] **RLS-aware database sessions** — SQLAlchemy async dependency that injects tenant context (`SET LOCAL`) before yielding
-- [x] **Configuration** — Pydantic settings loading Clerk secret key and database URL from environment
-- [x] **Workspace rules** — `.cursor/rules/` enforcing security, RLS, and card issuing conventions
+- [x] **FastAPI server** — health check, identity endpoint, and full CRUD APIs for the features below
+- [x] **Clerk authentication middleware** — verifies session tokens via `clerk-backend-api`; tenancy and role are resolved from the **database** (not JWT metadata), so membership changes take effect immediately
+- [x] **PostgreSQL schema** — companies, users, portfolio cards, reward rules, budgets, per diems, transactions, routing decisions, audit log
+- [x] **RLS on every tenant table** — `FORCE ROW LEVEL SECURITY`, fail-closed policies (no tenant context = zero rows), non-superuser `thesa_app` runtime role
+- [x] **Immutable audit trail** — trigger-based `audit_log` capturing every budget/limit/card/routing change with actor attribution; append-only enforced by trigger
+- [x] **Reward Router engine** — vendor spend aggregation, keyword merchant classifier, best-card recommendation with server-side uplift math, decision recording, rewards ledger
+- [x] **Budgets & per diems** — job-site budgets with month-to-date spend tracking; per-employee daily allowances with remaining-today view
+- [x] **Transactions** — manual entry (auto-categorized) and listing; seeds the Reward Router until the card feed lands
+- [x] **Role-based access** — owner / office_manager / crew_lead with per-endpoint enforcement
+- [x] **Security middleware** — security headers on every response, tiered rate limiting (per-user, per-IP, tighter on money-adjacent writes) with 429 + Retry-After
+- [x] **Onboarding** — atomic company + owner creation via SECURITY DEFINER function
+- [x] **Isolation verification** — `backend/db/verify_isolation.py` actively attempts cross-tenant reads/writes and audit tampering as the non-superuser role
+- [x] **Configuration & workspace rules** — Pydantic settings, `.cursor/rules/` conventions
 
 ## What's Next
 
-### Infrastructure & Database
-- [ ] PostgreSQL schema — companies, users, cards, transactions, budgets, audit log tables
-- [ ] RLS policies on all tenant-scoped tables
-- [ ] Immutable audit trail — trigger-based `audit_log` table that captures every budget/card/limit change with actor and timestamp
-- [ ] Wire `company_id` lookup from database (replace public metadata extraction)
+### Card Issuing & Policy Engine (deferred)
+- [ ] Marqeta integration — JIT funding webhook receiver with signature + replay protection
+- [ ] **Card Teller policy engine** — the 2-second decision loop: vendor approval, budget check, per diem check, policy evaluation, approve/decline response
+- [ ] Field card provisioning — crew lead requests a card scoped to a vendor/category, issued in seconds at the merchant counter
+- [ ] Physical card issuance and lifecycle management
+
+### Infrastructure
+- [ ] Alembic migrations (replace create_all bootstrap)
+- [ ] Redis-backed rate limiting for multi-replica deployments
 - [ ] CI/CD pipeline — `bandit` for static analysis, `safety` for dependency scanning, `pytest` on every commit
 
-### Card Issuing & Policy Engine
-- [ ] Marqeta integration — JIT funding webhook receiver
-- [ ] **Card Teller policy engine** — the 2-second decision loop: vendor approval, budget check, policy evaluation, approve/decline response
-- [ ] Virtual card provisioning — employee requests a card scoped to a vendor/category
-- [ ] Physical card issuance and lifecycle management
-- [ ] Reward optimization routing — recommend which corporate card to route recurring vendor spend to for maximum multiplier categories
-
 ### Receipt & Expense Automation
-- [ ] Zero-touch receipt parsing — Gmail API OAuth integration (minimum scope) to scan for airline/hotel receipts
+- [ ] Mobile receipt capture — photo upload from iOS app matched to transactions at the point of sale
+- [ ] Zero-touch receipt parsing — Gmail API OAuth integration (minimum scope) to scan for fuel/lodging/supplier receipts
 - [ ] Background worker to extract PDF receipts, parse totals, and match to transactions
-- [ ] Mobile receipt capture — photo upload from iOS app matched to transactions
 
 ### Command Center (Web)
-- [ ] Next.js dashboard for finance managers and company admins
+- [ ] Next.js dashboard for owners, office managers, and finance leads
+- [ ] Reward Router insights — rewards earned vs. baseline, routing recommendations awaiting approval
 - [ ] Company-wide transaction log viewer
-- [ ] Departmental budget management (e.g., "$10,000/mo for Marketing")
+- [ ] Crew and job-level budget management (e.g., "$10,000/mo for the Henderson job site")
 - [ ] Card issuance and limit controls
 - [ ] Flagged out-of-policy transaction review
 
-### Point-of-Sale Client (iOS)
-- [ ] Virtual card request flow — employee picks a vendor, gets a scoped card
-- [ ] Per diem and budget remaining views
-- [ ] Receipt photo capture and upload
+### Field Client (iOS)
+- [ ] Scoped card request flow — crew lead picks a vendor, gets a funded card in seconds
+- [ ] Per diem and job budget remaining views
+- [ ] Receipt photo capture and upload at the counter
 
 ### Testing & Security
-- [ ] Tenant isolation test suite — Pytest cases that actively attempt cross-tenant data access
+- [x] Tenant isolation verification — `verify_isolation.py` actively attempts cross-tenant data access (migrate to pytest with CI)
 - [ ] Webhook signature verification tests
 - [ ] Policy engine decision tests (approve, decline, flag edge cases)
+- [ ] Reward Router regression tests — routing recommendations against known card portfolios
 
 ## Development
 
@@ -77,11 +92,25 @@ pip install -r backend/requirements.txt
 
 # Set environment variables (or use .env)
 export CLERK_SECRET_KEY="sk_test_..."
-export DATABASE_URL="postgresql+asyncpg://localhost:5432/thesa"
+# Runtime role: non-superuser so RLS binds
+export DATABASE_URL="postgresql+asyncpg://thesa_app@localhost:5432/thesa"
+# Privileged role for schema bootstrap only
+export DATABASE_ADMIN_URL="postgresql+asyncpg://$(whoami)@localhost:5432/thesa"
+
+# Create the database, apply schema + RLS + audit triggers + grants
+createdb thesa
+python -m backend.db.bootstrap
+
+# Verify tenant isolation and audit immutability
+python -m backend.db.verify_isolation
 
 # Run the server
 uvicorn backend.main:app --reload
 ```
+
+## Security
+
+Thesa targets fintech-grade security: PCI-scope avoidance by design (Marqeta holds all PANs), PostgreSQL RLS with fail-closed policies, short-lived Clerk JWTs, webhook signature + replay protection, tiered rate limiting, encrypted-at-rest data with KMS-managed keys, and an immutable trigger-based audit log. The full control set — including the blocking pre-launch security gate — is documented in [DOCUMENTATION.md § Security Standard](DOCUMENTATION.md#security-standard).
 
 ## Project Rules
 

@@ -3,6 +3,6 @@ description: Rules for interacting with the card issuing processor API.
 globs: backend/services/issuing_*.py
 ---
 # Card Issuing Protocol
-We are using [INSERT CHOSEN ISSUER] for virtual card provisioning.
+We are using Marqeta (JIT funding) for virtual card provisioning.
 Always map their webhook events to our internal audit trail. 
 Never log the full API response payloads, as they may contain sensitive PII.
