@@ -172,6 +172,54 @@ async def main() -> None:
             check(True, "tenant B cannot write rows for tenant A")
         await session.rollback()
 
+    # Phase 3 tables: issued_cards stay tenant-isolated; tokens redacted in audit.
+    async with AsyncSession(engine) as session:
+        await set_tenant(session, company_a, owner_a)
+        card_id = (
+            await session.execute(
+                text(
+                    "INSERT INTO issued_cards "
+                    "(company_id, user_id, label, external_token, last4, status) "
+                    "VALUES (:c, :u, :n, :t, '4242', 'active') RETURNING id"
+                ),
+                {
+                    "c": company_a,
+                    "u": owner_a,
+                    "n": f"Stub card {run_id}",
+                    "t": f"stub_iso_{run_id}",
+                },
+            )
+        ).scalar_one()
+        await session.commit()
+
+    async with AsyncSession(engine) as session:
+        await set_tenant(session, company_b)
+        cross_cards = (
+            await session.execute(
+                text("SELECT count(*) FROM issued_cards WHERE id = :id"),
+                {"id": card_id},
+            )
+        ).scalar_one()
+        check(cross_cards == 0, "tenant B cannot see tenant A's issued card")
+
+    async with AsyncSession(engine) as session:
+        await set_tenant(session, company_a, owner_a)
+        audit_payload = (
+            await session.execute(
+                text(
+                    "SELECT new_data FROM audit_log "
+                    "WHERE table_name = 'issued_cards' AND row_id = :id "
+                    "AND action = 'INSERT' ORDER BY id DESC LIMIT 1"
+                ),
+                {"id": card_id},
+            )
+        ).scalar_one()
+        check(
+            audit_payload is not None
+            and "external_token" not in (audit_payload or {}),
+            "issued_cards audit redacts external_token",
+        )
+
     # No tenant context at all: fail closed.
     async with AsyncSession(engine) as session:
         blind_count = (

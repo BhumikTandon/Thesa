@@ -25,7 +25,13 @@ from starlette.types import ASGIApp
 from backend.config import get_settings
 from backend.db.session import get_session_factory
 
-_PUBLIC_PATHS: set[str] = {"/health", "/docs", "/openapi.json", "/redoc"}
+_PUBLIC_PATHS: set[str] = {
+    "/health",
+    "/docs",
+    "/openapi.json",
+    "/redoc",
+    "/webhooks/jit",
+}
 
 # Paths reachable by an authenticated Clerk user who has no company yet.
 _ONBOARDING_PATHS: set[str] = {"/onboarding", "/join"}

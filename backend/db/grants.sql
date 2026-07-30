@@ -20,8 +20,17 @@ GRANT USAGE ON SCHEMA public TO thesa_app;
 
 GRANT SELECT, INSERT, UPDATE ON
     companies, users, invites, portfolio_cards, reward_rules, budgets,
-    per_diems, transactions, routing_decisions
+    per_diems, transactions, routing_decisions,
+    spend_policies, issued_cards, authorization_decisions
 TO thesa_app;
+
+-- Webhook idempotency store: not tenant-scoped. INSERT/SELECT only — never
+-- mutate or delete processed event IDs (replay protection).
+-- Webhook idempotency store: not tenant-scoped. INSERT to claim an event_id,
+-- UPDATE to fill decision/reason after Card Teller; DELETE revoked (replay
+-- protection must not lose history).
+GRANT SELECT, INSERT, UPDATE ON webhook_events TO thesa_app;
+REVOKE DELETE ON webhook_events FROM thesa_app;
 
 -- Audit log is append-only for everyone; the app role cannot even try to
 -- UPDATE/DELETE (and the trigger blocks any role that can).
@@ -33,4 +42,5 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO thesa_app;
 GRANT EXECUTE ON FUNCTION resolve_user(text) TO thesa_app;
 GRANT EXECUTE ON FUNCTION create_company_with_owner(text, text, text) TO thesa_app;
 GRANT EXECUTE ON FUNCTION accept_invite(text, text) TO thesa_app;
+GRANT EXECUTE ON FUNCTION resolve_issued_card(text) TO thesa_app;
 GRANT EXECUTE ON FUNCTION current_tenant() TO thesa_app;

@@ -15,6 +15,7 @@ connect the application as a separate non-superuser role.
 import asyncio
 from pathlib import Path
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from backend.config import get_settings
@@ -30,6 +31,16 @@ async def bootstrap() -> None:
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+        # create_all does not ALTER existing tables. Add columns introduced
+        # after the initial schema so re-bootstrap on a live DB stays safe.
+        await conn.execute(
+            text(
+                "ALTER TABLE transactions "
+                "ADD COLUMN IF NOT EXISTS issued_card_id UUID "
+                "REFERENCES issued_cards(id)"
+            )
+        )
 
         # The SQL files contain DO $$ blocks and multi-statement scripts, so
         # they are executed through the asyncpg driver's simple-query protocol

@@ -324,6 +324,225 @@ def run() -> None:
         r = client.get("/routing/ledger", headers=auth("rival"))
         check(r.json()["accepted_decisions"] == 0, "new tenant has empty ledger")
 
+        # --- Issued cards + Card Teller + JIT webhook ----------------------
+        import json
+        import time
+
+        from backend.config import get_settings
+        from backend.services.webhook_security import build_signature
+
+        settings = get_settings()
+
+        r = client.post(
+            "/spend-policies",
+            headers=auth("owner"),
+            json={
+                "name": "No travel",
+                "denied_categories": ["travel"],
+                "max_transaction_cents": 50000,
+            },
+        )
+        check(r.status_code == 201, "owner creates spend policy")
+
+        r = client.post(
+            "/issued-cards",
+            headers=auth("crew"),
+            json={
+                "label": f"Shell card {_RUN}",
+                "scoped_vendor": "Shell",
+                "scoped_category": "fuel",
+                "single_tx_limit_cents": 10000,
+                "budget_id": budget_id,
+            },
+        )
+        check(r.status_code == 201, "crew provisions scoped card")
+        issued = r.json()
+        issued_id = issued["id"]
+        # Fetch external_token via DB is not exposed in API (by design). Resolve
+        # through a second provision for the owner used only in tests… instead
+        # look it up via resolve_issued_card after reading from list won't work.
+        # The stub token is not returned in IssuedCardOut (no PAN/token leak).
+        # Retrieve via admin query for the test:
+        from sqlalchemy import text as sa_text
+        import asyncio
+
+        # (token lookup uses a dedicated engine — see _token_for)
+        async def _token_for(card_id: str) -> str:
+            # Fresh engine bound to this event loop (the app's shared engine
+            # was created under TestClient's loop and cannot be reused here).
+            from sqlalchemy.ext.asyncio import (
+                async_sessionmaker,
+                create_async_engine,
+            )
+
+            engine = create_async_engine(settings.database_url)
+            factory = async_sessionmaker(engine, expire_on_commit=False)
+            company_id = client.get("/me", headers=auth("owner")).json()[
+                "company_id"
+            ]
+            try:
+                async with factory() as session:
+                    await session.execute(
+                        sa_text(
+                            "SELECT set_config('app.current_tenant', :t, true)"
+                        ),
+                        {"t": company_id},
+                    )
+                    row = (
+                        await session.execute(
+                            sa_text(
+                                "SELECT external_token FROM issued_cards "
+                                "WHERE id = :id"
+                            ),
+                            {"id": card_id},
+                        )
+                    ).first()
+                    return row[0]
+            finally:
+                await engine.dispose()
+
+        external_token = asyncio.run(_token_for(issued_id))
+        check(external_token.startswith("stub_"), "stub issuer token assigned")
+
+        def signed_jit(payload: dict) -> tuple[bytes, dict]:
+            raw = json.dumps(payload, separators=(",", ":")).encode()
+            ts = str(int(time.time()))
+            sig = build_signature(settings.webhook_hmac_secret, ts, raw)
+            return raw, {
+                "X-Thesa-Timestamp": ts,
+                "X-Thesa-Signature": sig,
+                "Content-Type": "application/json",
+            }
+
+        # Bad signature rejected before any DB work
+        check(
+            client.post(
+                "/webhooks/jit",
+                content=json.dumps(
+                    {
+                        "event_id": f"evt-bad-{_RUN}",
+                        "external_token": external_token,
+                        "merchant_name": "Shell Oil",
+                        "amount_cents": 2000,
+                    }
+                ),
+                headers={
+                    "X-Thesa-Timestamp": str(int(time.time())),
+                    "X-Thesa-Signature": "sha256=deadbeef",
+                    "Content-Type": "application/json",
+                },
+            ).status_code
+            == 401,
+            "bad webhook signature rejected",
+        )
+
+        # Approve in-scope fuel at Shell
+        event_ok = f"evt-ok-{_RUN}"
+        raw, headers = signed_jit(
+            {
+                "event_id": event_ok,
+                "external_token": external_token,
+                "merchant_name": "Shell Oil #99",
+                "amount_cents": 2500,
+            }
+        )
+        r = client.post("/webhooks/jit", content=raw, headers=headers)
+        check(
+            r.status_code == 200 and r.json()["decision"] == "approved",
+            "Card Teller approves in-scope spend",
+        )
+
+        # Replay returns same decision, no double spend
+        r2 = client.post("/webhooks/jit", content=raw, headers=headers)
+        check(
+            r2.status_code == 200 and r2.json()["decision"] == "approved",
+            "webhook replay is idempotent",
+        )
+
+        # Vendor mismatch declined
+        raw, headers = signed_jit(
+            {
+                "event_id": f"evt-vendor-{_RUN}",
+                "external_token": external_token,
+                "merchant_name": "Home Depot",
+                "amount_cents": 2000,
+            }
+        )
+        r = client.post("/webhooks/jit", content=raw, headers=headers)
+        check(
+            r.status_code == 200 and r.json()["decision"] == "declined",
+            "Card Teller declines vendor mismatch",
+        )
+
+        # Policy denies travel
+        r = client.post(
+            "/issued-cards",
+            headers=auth("owner"),
+            json={"label": f"Open card {_RUN}", "user_id": crew_user_id},
+        )
+        open_id = r.json()["id"]
+        open_token = asyncio.run(_token_for(open_id))
+        raw, headers = signed_jit(
+            {
+                "event_id": f"evt-travel-{_RUN}",
+                "external_token": open_token,
+                "merchant_name": "United Airlines",
+                "amount_cents": 3000,
+            }
+        )
+        r = client.post("/webhooks/jit", content=raw, headers=headers)
+        check(
+            r.status_code == 200
+            and r.json()["decision"] == "declined"
+            and r.json()["reason"] == "policy_denied_category",
+            "Card Teller declines denied category via policy",
+        )
+
+        # Over single-tx limit
+        raw, headers = signed_jit(
+            {
+                "event_id": f"evt-limit-{_RUN}",
+                "external_token": external_token,
+                "merchant_name": "Shell Oil",
+                "amount_cents": 15000,
+            }
+        )
+        r = client.post("/webhooks/jit", content=raw, headers=headers)
+        check(
+            r.json()["decision"] == "declined"
+            and r.json()["reason"] == "over_single_tx_limit",
+            "Card Teller declines over single-tx limit",
+        )
+
+        # Freeze blocks further spend
+        r = client.patch(
+            f"/issued-cards/{issued_id}",
+            headers=auth("owner"),
+            json={"status": "frozen"},
+        )
+        check(r.status_code == 200 and r.json()["status"] == "frozen", "owner freezes card")
+        raw, headers = signed_jit(
+            {
+                "event_id": f"evt-frozen-{_RUN}",
+                "external_token": external_token,
+                "merchant_name": "Shell Oil",
+                "amount_cents": 1000,
+            }
+        )
+        r = client.post("/webhooks/jit", content=raw, headers=headers)
+        check(
+            r.json()["decision"] == "declined" and "frozen" in r.json()["reason"],
+            "frozen card declines",
+        )
+
+        r = client.get("/authorization-decisions", headers=auth("owner"))
+        check(r.status_code == 200 and len(r.json()) >= 4, "auth decisions listed")
+        check(
+            client.get("/authorization-decisions", headers=auth("crew")).status_code
+            == 403,
+            "crew cannot list auth decisions",
+        )
+
         # --- Rate limiting -----------------------------------------------------
         client.post(
             "/onboarding",

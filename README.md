@@ -35,7 +35,7 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 
 - [x] **FastAPI server** — health check, identity endpoint, and full CRUD APIs for the features below
 - [x] **Clerk authentication middleware** — verifies session tokens via `clerk-backend-api`; tenancy and role are resolved from the **database** (not JWT metadata), so membership changes take effect immediately
-- [x] **PostgreSQL schema** — companies, users, portfolio cards, reward rules, budgets, per diems, transactions, routing decisions, audit log
+- [x] **PostgreSQL schema** — companies, users, invites, portfolio cards, reward rules, budgets, per diems, transactions, routing decisions, spend policies, issued cards, authorization decisions, webhook events, audit log
 - [x] **RLS on every tenant table** — `FORCE ROW LEVEL SECURITY`, fail-closed policies (no tenant context = zero rows), non-superuser `thesa_app` runtime role
 - [x] **Immutable audit trail** — trigger-based `audit_log` capturing every budget/limit/card/routing change with actor attribution; append-only enforced by trigger
 - [x] **Reward Router engine** — vendor spend aggregation, keyword merchant classifier, best-card recommendation with server-side uplift math, decision recording, rewards ledger
@@ -45,16 +45,19 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 - [x] **Security middleware** — security headers on every response, tiered rate limiting (per-user, per-IP, tighter on money-adjacent writes) with 429 + Retry-After
 - [x] **Onboarding & team** — atomic company + owner creation; email invites with roles, revocation, and join flow (invitee's email verified server-side with Clerk, never client-supplied)
 - [x] **Isolation verification** — `backend/db/verify_isolation.py` actively attempts cross-tenant reads/writes and audit tampering as the non-superuser role
-- [x] **API flow verification** — `backend/verify_api_flows.py` runs 37 end-to-end HTTP checks across every feature with only the Clerk network boundary faked
+- [x] **API flow verification** — `backend/verify_api_flows.py` runs 50 end-to-end HTTP checks across every feature with only the Clerk network boundary faked
+- [x] **Command Center (web)** — Next.js 16 dashboard in `frontend/`: Clerk sign-in, onboarding (create company / join via invite), overview, Reward Router (recommendations, accept/dismiss, ledger), transactions, budgets, card portfolio, and team pages with role-aware UI
+- [x] **CORS allowlist** — explicit single-origin allowlist on the API, bearer-token only (no cookies/credentials)
+- [x] **Card Teller & issued cards** — scoped virtual card provisioning (stub issuer), spend policies, JIT webhook with HMAC + replay protection, fail-closed authorize/decline loop (status → expiry → limit → vendor/category → policy → budget → per diem)
 - [x] **Configuration & workspace rules** — Pydantic settings, `.cursor/rules/` conventions
 
 ## What's Next
 
-### Card Issuing & Policy Engine (deferred)
-- [ ] Marqeta integration — JIT funding webhook receiver with signature + replay protection
-- [ ] **Card Teller policy engine** — the 2-second decision loop: vendor approval, budget check, per diem check, policy evaluation, approve/decline response
-- [ ] Field card provisioning — crew lead requests a card scoped to a vendor/category, issued in seconds at the merchant counter
-- [ ] Physical card issuance and lifecycle management
+### Card Issuing — Marqeta (real issuer)
+- [ ] Swap `issuing_stub` for Marqeta JIT funding (same Card Teller + webhook contract)
+- [ ] Mutual TLS / IP allowlisting at the edge for webhook traffic
+- [ ] Field card provisioning UX polish + physical card lifecycle
+- [ ] Command Center issuance controls UI (API ready)
 
 ### Infrastructure
 - [ ] Alembic migrations (replace create_all bootstrap)
@@ -67,12 +70,12 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 - [ ] Background worker to extract PDF receipts, parse totals, and match to transactions
 
 ### Command Center (Web)
-- [ ] Next.js dashboard for owners, office managers, and finance leads
-- [ ] Reward Router insights — rewards earned vs. baseline, routing recommendations awaiting approval
-- [ ] Company-wide transaction log viewer
-- [ ] Crew and job-level budget management (e.g., "$10,000/mo for the Henderson job site")
-- [ ] Card issuance and limit controls
-- [ ] Flagged out-of-policy transaction review
+- [x] Next.js dashboard for owners, office managers, and finance leads
+- [x] Reward Router insights — rewards earned vs. baseline, routing recommendations awaiting approval
+- [x] Company-wide transaction log viewer
+- [x] Crew and job-level budget management (e.g., "$10,000/mo for the Henderson job site")
+- [ ] Card issuance and limit controls UI (API ready; blocked on Marqeta swap for production)
+- [ ] Flagged out-of-policy transaction review UI (authorization decisions API ready)
 
 ### Field Client (iOS)
 - [ ] Scoped card request flow — crew lead picks a vendor, gets a funded card in seconds
@@ -81,8 +84,8 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 
 ### Testing & Security
 - [x] Tenant isolation verification — `verify_isolation.py` actively attempts cross-tenant data access (migrate to pytest with CI)
-- [ ] Webhook signature verification tests
-- [ ] Policy engine decision tests (approve, decline, flag edge cases)
+- [x] Webhook signature + replay + Card Teller decision checks in `verify_api_flows.py`
+- [ ] Policy engine edge-case suite as pytest
 - [ ] Reward Router regression tests — routing recommendations against known card portfolios
 
 ## Development
@@ -105,13 +108,20 @@ python -m backend.db.bootstrap
 # Verify tenant isolation and audit immutability
 python -m backend.db.verify_isolation
 
-# Run the server
+# Run the API server
 uvicorn backend.main:app --reload
+
+# Run the Command Center (separate terminal)
+cd frontend
+npm install
+npm run dev   # http://localhost:3000, expects the API on :8000
 ```
+
+The frontend reads `frontend/.env.local` for the Clerk publishable/secret keys and `NEXT_PUBLIC_API_URL`.
 
 ## Security
 
-Thesa targets fintech-grade security: PCI-scope avoidance by design (Marqeta holds all PANs), PostgreSQL RLS with fail-closed policies, short-lived Clerk JWTs, webhook signature + replay protection, tiered rate limiting, encrypted-at-rest data with KMS-managed keys, and an immutable trigger-based audit log. The full control set — including the blocking pre-launch security gate — is documented in [DOCUMENTATION.md § Security Standard](DOCUMENTATION.md#security-standard).
+Thesa targets fintech-grade security: PCI-scope avoidance by design (issuer holds all PANs), PostgreSQL RLS with fail-closed policies, short-lived Clerk JWTs, webhook signature + replay protection, tiered rate limiting, and an immutable trigger-based audit log. Encryption at rest with KMS-managed keys is required before production (see [DOCUMENTATION.md § Security Standard](DOCUMENTATION.md#security-standard)).
 
 ## Project Rules
 

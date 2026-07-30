@@ -40,7 +40,8 @@ DECLARE
 BEGIN
     FOREACH t IN ARRAY ARRAY[
         'users', 'invites', 'portfolio_cards', 'reward_rules', 'budgets',
-        'per_diems', 'transactions', 'routing_decisions'
+        'per_diems', 'transactions', 'routing_decisions',
+        'spend_policies', 'issued_cards', 'authorization_decisions'
     ]
     LOOP
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
@@ -132,7 +133,8 @@ DECLARE
 BEGIN
     FOREACH t IN ARRAY ARRAY[
         'budgets', 'per_diems', 'portfolio_cards', 'reward_rules',
-        'routing_decisions', 'users', 'invites'
+        'routing_decisions', 'users', 'invites',
+        'spend_policies', 'authorization_decisions'
     ]
     LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS %I_audit ON %I', t, t);
@@ -144,6 +146,45 @@ BEGIN
         );
     END LOOP;
 END $$;
+
+-- Issued cards: same audit trail, but strip external_token from the JSON
+-- payload so network tokens never land in audit_log (PCI / card-issuing rule).
+CREATE OR REPLACE FUNCTION audit_issued_card_change() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_old jsonb;
+    v_new jsonb;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        v_old := to_jsonb(OLD) - 'external_token';
+        INSERT INTO audit_log (
+            company_id, table_name, row_id, action, actor_user_id, old_data, new_data
+        ) VALUES (
+            OLD.company_id, TG_TABLE_NAME, OLD.id, TG_OP,
+            NULLIF(current_setting('app.current_user', true), ''),
+            v_old, NULL
+        );
+        RETURN OLD;
+    END IF;
+
+    v_new := to_jsonb(NEW) - 'external_token';
+    IF TG_OP = 'UPDATE' THEN
+        v_old := to_jsonb(OLD) - 'external_token';
+    END IF;
+    INSERT INTO audit_log (
+        company_id, table_name, row_id, action, actor_user_id, old_data, new_data
+    ) VALUES (
+        NEW.company_id, TG_TABLE_NAME, NEW.id, TG_OP,
+        NULLIF(current_setting('app.current_user', true), ''),
+        v_old, v_new
+    );
+    RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS issued_cards_audit ON issued_cards;
+CREATE TRIGGER issued_cards_audit
+    AFTER INSERT OR UPDATE OR DELETE ON issued_cards
+    FOR EACH ROW EXECUTE FUNCTION audit_issued_card_change();
 
 -- ============================================================================
 -- Auth functions (SECURITY DEFINER)
@@ -231,3 +272,32 @@ BEGIN
 
     RETURN QUERY SELECT v_invite.company_id, v_user_id, v_invite.role::text;
 END $$;
+
+-- Resolve an issued card by its opaque issuer token (network token / stub id).
+-- Called by the JIT webhook before a tenant context exists.
+CREATE OR REPLACE FUNCTION resolve_issued_card(p_external_token text)
+RETURNS TABLE (
+    card_id uuid,
+    company_id uuid,
+    user_id uuid,
+    budget_id uuid,
+    status text,
+    scoped_vendor text,
+    scoped_category text,
+    single_tx_limit_cents bigint,
+    expires_at timestamptz
+)
+LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+    SELECT
+        c.id,
+        c.company_id,
+        c.user_id,
+        c.budget_id,
+        c.status::text,
+        c.scoped_vendor,
+        c.scoped_category,
+        c.single_tx_limit_cents,
+        c.expires_at
+    FROM issued_cards c
+    WHERE c.external_token = p_external_token
+$$;

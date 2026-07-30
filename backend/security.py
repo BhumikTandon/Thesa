@@ -42,21 +42,29 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Requests per 60-second sliding window.
+# Requests per 60-second sliding window. Reads are generous — an
+# authenticated user browsing the dashboard fires several GETs per page and
+# rate limiting is an abuse control, not an authorization boundary (RLS and
+# RBAC hold regardless of request volume). Writes stay tight, money-adjacent
+# writes tightest.
 ANON_IP_LIMIT = 300
-USER_LIMIT = 60
+READ_LIMIT = 240
+WRITE_LIMIT = 60
 SENSITIVE_LIMIT = 30
 
 _WINDOW_SECONDS = 60.0
 
 # State-changing operations on money-adjacent resources get the tight limit.
-_SENSITIVE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
+_WRITE_METHODS = {"POST", "PATCH", "PUT", "DELETE"}
 _SENSITIVE_PREFIXES = (
     "/portfolio-cards",
     "/budgets",
     "/per-diems",
     "/routing",
     "/team",
+    "/issued-cards",
+    "/spend-policies",
+    "/webhooks",
 )
 
 
@@ -87,7 +95,10 @@ class _SlidingWindow:
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Tiered rate limiting (runs after auth, so identity is available).
 
-    - Authenticated: per-user limit, tighter on sensitive write endpoints.
+    - Authenticated reads: generous per-user limit.
+    - Authenticated writes: tighter per-user limit; tightest on
+      money-adjacent endpoints (separate budget, so a burst of reads can
+      never starve writes or vice versa).
     - Unauthenticated / public: per-IP limit.
     Responses over the limit get 429 with Retry-After.
     """
@@ -107,13 +118,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         clerk_user_id = getattr(request.state, "clerk_user_id", None)
         if clerk_user_id:
-            key = f"user:{clerk_user_id}"
-            limit = USER_LIMIT
-            if request.method in _SENSITIVE_METHODS and request.url.path.startswith(
-                _SENSITIVE_PREFIXES
-            ):
+            if request.method not in _WRITE_METHODS:
+                key = f"user-read:{clerk_user_id}"
+                limit = READ_LIMIT
+            elif request.url.path.startswith(_SENSITIVE_PREFIXES):
                 key = f"user-sensitive:{clerk_user_id}"
                 limit = SENSITIVE_LIMIT
+            else:
+                key = f"user-write:{clerk_user_id}"
+                limit = WRITE_LIMIT
         else:
             client_ip = request.client.host if request.client else "unknown"
             key = f"ip:{client_ip}"

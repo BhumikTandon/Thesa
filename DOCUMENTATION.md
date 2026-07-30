@@ -70,7 +70,7 @@ The structural moat: incumbents monetize their own card's interchange, so recomm
 │  FastAPI Backend (backend/main.py)                           │
 │    └── AuthMiddleware (backend/auth/middleware.py)           │
 │          • Verifies Clerk session token                      │
-│          • Extracts company_id + user_id from JWT            │
+│          • Resolves company_id + role from DB (not JWT)      │
 └─────────────────────────┬───────────────────────────────────┘
                           │
           ┌───────────────┴───────────────┐
@@ -92,7 +92,7 @@ The structural moat: incumbents monetize their own card's interchange, so recomm
 |-----------|---------------|
 | Zero-trust input handling | Parameterized queries only; all input assumed malicious |
 | Database-level isolation | RLS via `SET LOCAL`, never application-layer `WHERE` clauses |
-| Immutable audit trail | Every budget/limit/card/routing change recorded (planned) |
+| Immutable audit trail | Every budget/limit/card/routing/policy change recorded immutably |
 | No raw sensitive data | Network tokens instead of raw PANs |
 | Issuer neutrality | Reward Router optimizes across the customer's full card portfolio |
 
@@ -110,13 +110,15 @@ The structural moat: incumbents monetize their own card's interchange, so recomm
 | Configuration | pydantic-settings | 2.7.1 |
 | Authentication | Clerk (clerk-backend-api) | 6.0.1 |
 | Database | PostgreSQL with Row-Level Security | — |
+| Web UI | Next.js (App Router) + React | 16.2.12 / 19.2.4 |
+| Web Auth | @clerk/nextjs | 7.6.3 |
+| Web Styling | Tailwind CSS | 4.x |
 
 ### Planned additions
 
 | Layer | Technology |
 |-------|-----------|
 | Card Issuing | Marqeta (JIT funding) |
-| Web UI | React / Next.js |
 | Mobile | Swift (iOS) |
 | Receipt Parsing | Gmail API |
 | Testing | pytest, bandit, safety |
@@ -132,15 +134,25 @@ Thesa/
 │   ├── global-security.mdc      # Zero-trust security rules
 │   └── python-backend.mdc       # Python/FastAPI coding standards
 ├── .env                         # Local secrets (gitignored)
-├── .gitignore                   # Ignores .env, __pycache__/, *.pyc, venv/
+├── .gitignore                   # Ignores .env, venv/, node_modules/, .next/, .env.local
 ├── README.md                    # Project overview and roadmap
 ├── DOCUMENTATION.md             # This file
 ├── get-token.html               # Dev utility — Clerk sign-in to get bearer tokens
+├── frontend/                    # Next.js Command Center (web dashboard)
+│   ├── .env.local               # Clerk keys + API URL (gitignored)
+│   ├── src/proxy.ts             # Clerk route protection (all routes except /sign-in)
+│   ├── src/lib/                 # api.ts (bearer fetch hook), types.ts, format.ts
+│   ├── src/components/          # ui.tsx primitives, me-context.tsx (identity/role)
+│   └── src/app/
+│       ├── sign-in/             # Clerk-hosted sign-in component
+│       ├── onboarding/          # Create company or join via invite
+│       └── (dashboard)/         # Sidebar shell: overview, router, transactions,
+│                                #   budgets, cards, team (role-aware UI)
 └── backend/
     ├── __init__.py              # Package marker
     ├── main.py                  # FastAPI app: middleware stack + router registration
     ├── config.py                # Pydantic settings (runtime + admin DB URLs, Clerk key)
-    ├── models.py                # SQLAlchemy ORM models (9 tables)
+    ├── models.py                # SQLAlchemy ORM models (issued cards, policies, auth decisions, …)
     ├── schemas.py               # Pydantic request/response schemas (extra=forbid)
     ├── deps.py                  # Role-based access dependency (require_role)
     ├── security.py              # Security headers + tiered rate limiting middleware
@@ -155,14 +167,22 @@ Thesa/
     │   └── verify_isolation.py  # Active cross-tenant attack verification
     ├── services/
     │   ├── vendor_classifier.py # Keyword merchant → category classifier
-    │   └── reward_router.py     # Reward Router engine (flagship)
+    │   ├── reward_router.py     # Reward Router engine (flagship)
+    │   ├── card_teller.py       # Authorization decision loop
+    │   ├── issuing_stub.py      # Temp card issuer (swap for Marqeta)
+    │   └── webhook_security.py  # HMAC + timestamp verification
     └── routes/
-        ├── onboarding.py        # POST /onboarding
+        ├── onboarding.py        # POST /onboarding, /join
+        ├── team.py              # /team/*
         ├── portfolio.py         # /portfolio-cards
         ├── budgets.py           # /budgets
         ├── per_diems.py         # /per-diems
         ├── transactions.py      # /transactions
-        └── routing.py           # /routing (recommendations, decisions, ledger)
+        ├── routing.py           # /routing
+        ├── spend_policies.py    # /spend-policies
+        ├── issued_cards.py      # /issued-cards
+        ├── authorization_decisions.py
+        └── webhooks.py          # POST /webhooks/jit (HMAC, public)
 ```
 
 ---
@@ -174,13 +194,13 @@ Thesa/
 The FastAPI application is created here with:
 - App title set to "Thesa" with Swagger docs at `/docs`
 - Middleware stack (execution order): `SecurityHeadersMiddleware` → `AuthMiddleware` → `RateLimitMiddleware` → routes, so headers are stamped on every response and rate limiting keys on the resolved identity
-- Routers for onboarding, portfolio, budgets, per diems, transactions, and routing, plus `/health` and `/me`
+- Routers for onboarding, team, portfolio, budgets, per diems, transactions, routing, spend policies, issued cards, authorization decisions, and the JIT webhook, plus `/health` and `/me`
 
 ### `backend/auth/middleware.py` — Clerk Authentication Middleware
 
 Handles all authentication logic:
 1. Intercepts every incoming request before it reaches route handlers
-2. Bypasses auth for public paths: `/health`, `/docs`, `/openapi.json`, `/redoc`
+2. Bypasses auth for public paths: `/health`, `/docs`, `/openapi.json`, `/redoc`, `/webhooks/jit` (webhook uses HMAC, not Clerk)
 3. For protected paths:
    - Extracts `Authorization: Bearer <token>` header
    - Validates the token via Clerk SDK's `authenticate_request()`
@@ -212,6 +232,9 @@ Uses Pydantic's `BaseSettings` to load configuration from environment variables 
 | `CLERK_SECRET_KEY` | Yes | — |
 | `DATABASE_URL` | No | `postgresql+asyncpg://thesa_app@localhost:5432/thesa` (non-superuser so RLS binds) |
 | `DATABASE_ADMIN_URL` | For bootstrap | Falls back to `DATABASE_URL`; privileged role for schema changes only |
+| `FRONTEND_ORIGIN` | No | `http://localhost:3000` — the single allowed CORS origin for the Command Center |
+| `WEBHOOK_HMAC_SECRET` | Prod yes | HMAC secret for `/webhooks/jit`; default `dev-webhook-hmac-change-me` for local only |
+| `WEBHOOK_TIMESTAMP_SKEW_SECONDS` | No | `300` — ± window for webhook timestamp replay protection |
 
 ---
 
@@ -244,6 +267,14 @@ All authenticated endpoints require a valid Clerk bearer token; tenancy and role
 | `POST` | `/routing/decisions` | mgr | Accept/dismiss a recommendation (figures recomputed server-side) |
 | `GET` | `/routing/decisions` | mgr | Decision history |
 | `GET` | `/routing/ledger` | mgr | Rewards ledger: accepted decisions and estimated uplift |
+| `GET` | `/spend-policies` | any | List company spend policies |
+| `POST` | `/spend-policies` | mgr | Create a deny-category / max-tx policy (audited) |
+| `PATCH` | `/spend-policies/{id}` | mgr | Update or deactivate a policy |
+| `GET` | `/issued-cards` | any | List issued cards (crew: own only) |
+| `POST` | `/issued-cards` | any | Provision a scoped virtual card (stub issuer; crew: self only) |
+| `PATCH` | `/issued-cards/{id}` | mgr | Freeze / cancel / reactivate (audited) |
+| `GET` | `/authorization-decisions` | mgr | Card Teller decision history |
+| `POST` | `/webhooks/jit` | public* | JIT auth webhook (`*` HMAC + timestamp, not Clerk) |
 | `GET` | `/docs`, `/redoc`, `/openapi.json` | public | API documentation (auto-generated) |
 
 ---
@@ -340,16 +371,16 @@ Content-Security-Policy: default-src 'self'; frame-ancestors 'none'   (web; tigh
 Permissions-Policy: camera=(), geolocation=(), microphone=()          (web; camera allowed only on receipt-capture routes)
 ```
 
-Status: **Implemented** for the API (`backend/security.py`, `SecurityHeadersMiddleware`): HSTS, nosniff, frame denial, referrer and permissions policies on every response, `Cache-Control: no-store` on authenticated responses. CORS allowlisting and the web CSP land with the Command Center.
+Status: **Implemented** for the API (`backend/security.py`, `SecurityHeadersMiddleware`): HSTS, nosniff, frame denial, referrer and permissions policies on every response, `Cache-Control: no-store` on authenticated responses. **CORS is implemented** as an explicit single-origin allowlist (`FRONTEND_ORIGIN`, default `http://localhost:3000`) with `allow_credentials=False` — the API is bearer-token only, so no cookies ever cross origins. The web CSP remains open for the Command Center.
 
 ### 6. Rate Limiting & Abuse Prevention
 
-Status: **Implemented (single instance)** — `RateLimitMiddleware` in `backend/security.py` enforces sliding-window limits: 300/min per IP (unauthenticated), 60/min per user, 30/min per user on money-adjacent writes (portfolio, budgets, per diems, routing), with `429` + `Retry-After`. The store is in-process; move it to Redis before running multiple API replicas. Remaining targets:
+Status: **Implemented (single instance)** — `RateLimitMiddleware` in `backend/security.py` enforces sliding-window limits with separate per-user budgets so reads can never starve writes: 300/min per IP (unauthenticated), 240/min per user on reads, 60/min per user on writes, 30/min per user on money-adjacent writes (portfolio, budgets, per diems, routing, team), with `429` + `Retry-After`. Reads are deliberately generous — rate limiting is an abuse control, not an authorization boundary (RLS and RBAC hold at any request volume), and a dashboard user legitimately fires several GETs per page. The store is in-process; move it to Redis before running multiple API replicas. Remaining targets:
 
 | Layer | Policy |
 |---|---|
 | Global per-IP | Baseline sliding-window limit at the edge (e.g. 300 req/min) to blunt scraping and floods |
-| Per-user | Authenticated limit keyed on `user_id` (e.g. 60 req/min) so one stolen token can't hammer the API |
+| Per-user | Authenticated limits keyed on `user_id` (240/min reads, 60/min writes) so one stolen token can't hammer the API |
 | Per-tenant | Aggregate limit keyed on `company_id` so a runaway integration in one company can't degrade others (multi-tenant fairness) |
 | Sensitive endpoints | Much tighter limits on card issuance, limit changes, and token-adjacent routes (e.g. 5/min per user) with alerting on breach |
 | Auth endpoints | Brute-force protection is delegated to Clerk (lockouts, bot detection) — verify it is enabled in the Clerk dashboard |
@@ -380,13 +411,7 @@ The architecture is deliberately designed to keep Thesa **out of PCI DSS scope f
 
 ### 9. Webhook Security (Marqeta JIT Funding)
 
-The JIT funding webhook is the highest-value attack surface: a forged "approve" is stolen money. Requirements before the receiver ships:
-
-1. **Signature verification first** — HMAC verification with constant-time comparison happens before JSON parsing or any DB access; unsigned or mis-signed requests get a 401 and a metric, nothing else.
-2. **Replay protection** — reject events with timestamps outside a ±5 minute window; store processed event IDs and drop duplicates (idempotency).
-3. **Mutual TLS or IP allowlisting** — accept webhook traffic only from Marqeta's published ranges at the edge.
-4. **Fail closed** — if the policy engine cannot reach the database or exceeds its decision deadline, the authorization is *declined*, never defaulted to approve.
-5. **Separate credentials** — the webhook path runs with a DB role that can write authorization decisions and audit rows but cannot read other tenants' data or mutate budgets.
+Status: **Implemented (stub issuer)** — `POST /webhooks/jit` verifies `X-Thesa-Signature` (HMAC-SHA256 over `{timestamp}.{body}`) with `hmac.compare_digest` and rejects timestamps outside `WEBHOOK_TIMESTAMP_SKEW_SECONDS` (±5 min default) *before* JSON parsing or DB work. Processed `event_id`s are stored in `webhook_events` for idempotent replay. Unknown cards and Card Teller errors **decline** (fail closed). Remaining for production Marqeta: mutual TLS / IP allowlisting at the edge, secrets-manager-backed HMAC secret (replace `WEBHOOK_HMAC_SECRET` default), and a dedicated least-privilege webhook DB role.
 
 ### 10. Tenant Isolation Guarantees
 
@@ -422,10 +447,10 @@ Per the workspace security rule, every change to a budget, limit, card status, o
 
 - Trigger-based `audit_log` table written by PostgreSQL triggers, not application code, so no code path can skip it.
 - Append-only: the application role has `INSERT` only — no `UPDATE`/`DELETE` grants; optionally shipped to WORM object storage for tamper evidence.
-- Each row captures actor (`user_id`), tenant, action, before/after values, timestamp, and request ID for correlation with API logs.
-- Audit reads are themselves tenant-scoped via RLS and restricted to admin roles.
+- Each row captures actor (`user_id` / webhook system actor), tenant, action, before/after values, and timestamp. Request-ID correlation with API logs is a remaining production logging target.
+- Audit reads are tenant-scoped via RLS. A dedicated admin-only audit API is not yet shipped.
 
-Status: **Implemented** (`backend/db/rls.sql`): the `audit_row_change` trigger covers budgets, per diems, portfolio cards, reward rules, and routing decisions; a `BEFORE UPDATE OR DELETE` trigger raises on any mutation attempt, and the app role has no UPDATE/DELETE grants. Verified by `verify_isolation.py` (actor attribution and tamper rejection).
+Status: **Implemented** (`backend/db/rls.sql`): `audit_row_change` covers budgets, per diems, portfolio cards, reward rules, routing decisions, users, invites, spend policies, and authorization decisions; `issued_cards` uses a dedicated trigger that redacts `external_token` from the JSON payload. A `BEFORE UPDATE OR DELETE` trigger raises on any mutation attempt, and the app role has no UPDATE/DELETE grants on `audit_log`. Verified by `verify_isolation.py` (actor attribution and tamper rejection).
 
 ### 14. Dependency & Supply Chain Security
 
@@ -461,7 +486,7 @@ Status: **Implemented** (`backend/db/rls.sql`): the `audit_row_change` trigger c
 
 ### Pre-Launch Security Gate
 
-The following are **blocking** for any production traffic. Done: RLS with fail-closed defaults and cross-tenant verification (§10), rate limiting (§6, single-instance), security headers (§5), immutable audit log (§13). Remaining: webhook signature + replay protection (§9, lands with Marqeta), TLS termination/HSTS at the edge (§4), secrets manager migration (§12), Redis rate-limit store for replicas (§6), and CI security scanning (§14).
+The following are **blocking** for any production traffic. Done: RLS with fail-closed defaults and cross-tenant verification (§10), rate limiting (§6, single-instance), security headers (§5), immutable audit log (§13), webhook HMAC + timestamp skew + event_id replay with fail-closed declines (§9, stub issuer). Remaining for production: live Marqeta issuer + edge mTLS/IP allowlisting (§9), TLS termination/HSTS at the edge (§4), secrets manager migration (§12), Redis rate-limit store for replicas (§6), dedicated least-privilege webhook DB role (§9), and CI security scanning (§14).
 
 ---
 
@@ -469,13 +494,13 @@ The following are **blocking** for any production traffic. Done: RLS with fail-c
 
 ### How RLS Tenant Isolation Works
 
-1. Every authenticated request has `company_id` extracted from the Clerk JWT
-2. Before any query runs, the session executes:
+1. Every authenticated request resolves `company_id` from the database via `resolve_user` (JWT `sub` only identifies the Clerk user)
+2. Before any query runs, the session executes parameterized:
    ```sql
-   SET LOCAL app.current_tenant = :tenant_id
+   SELECT set_config('app.current_tenant', :tenant_id, true)
    ```
-3. PostgreSQL RLS policies (to be defined) will reference `current_setting('app.current_tenant')` to filter rows
-4. The database is physically blind to other tenants' data — no application-layer `WHERE` clauses needed
+3. PostgreSQL RLS policies (`backend/db/rls.sql`) reference `current_tenant()` / `current_setting('app.current_tenant')` to filter rows
+4. The database is physically blind to other tenants' data — tenancy is not enforced via application-layer `WHERE company_id = …` filters
 
 ### Connection Pool Configuration
 
@@ -494,13 +519,17 @@ The following are **blocking** for any production traffic. Done: RLS with fail-c
 - `reward_rules` — category-specific earn rates per portfolio card (e.g. fuel → 4%)
 - `budgets` — job-site and departmental monthly spending limits (integer cents)
 - `per_diems` — daily allowances for field employees
-- `transactions` — purchase records, auto-categorized by the merchant classifier
+- `transactions` — purchase records (manual or approved JIT), auto-categorized by the merchant classifier
 - `routing_decisions` — Reward Router recommendations and outcomes; accepted rows form the rewards ledger for take-rate billing
-- `audit_log` — immutable record of all changes to budgets, per diems, cards, reward rules, and routing decisions (trigger-written, append-only)
+- `spend_policies` — company deny-category / max-transaction rules for the Card Teller
+- `issued_cards` — Thesa-issued scoped virtual cards (opaque `external_token` + last4; stub issuer today, Marqeta later)
+- `authorization_decisions` — Card Teller approve/decline outcomes per JIT event
+- `webhook_events` — non-tenant idempotency store for JIT `event_id` replay protection
+- `audit_log` — immutable record of sensitive changes (trigger-written, append-only; issued-card tokens redacted)
 
 Schema, RLS policies (`backend/db/rls.sql`), and the least-privilege `thesa_app` role (`backend/db/grants.sql`) are applied by `python -m backend.db.bootstrap`. `backend/db/verify_isolation.py` verifies isolation and audit immutability against a live database.
 
-A `cards` table for Thesa-issued cards arrives with the Marqeta integration.
+Physical card PANs remain out of scope forever — Marqeta holds them; Thesa stores only network tokens and last4.
 
 ---
 
@@ -516,6 +545,17 @@ CLERK_SECRET_KEY=sk_test_...
 DATABASE_URL=postgresql+asyncpg://thesa_app@localhost:5432/thesa
 # Privileged role for schema bootstrap only
 DATABASE_ADMIN_URL=postgresql+asyncpg://<local-superuser>@localhost:5432/thesa
+# JIT webhook HMAC (rotate before any real issuer traffic)
+WEBHOOK_HMAC_SECRET=dev-webhook-hmac-change-me
+```
+
+The Command Center reads its own `frontend/.env.local` (gitignored):
+
+```env
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_SECRET_KEY=sk_test_...
+NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
+NEXT_PUBLIC_API_URL=http://localhost:8000
 ```
 
 ### Running the Server
@@ -572,20 +612,26 @@ A standalone HTML page for local development that:
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| FastAPI server | Done | Health, identity, and full feature APIs (22 routes) |
+| FastAPI server | Done | Health, identity, and full feature APIs (30+ routes) |
 | Clerk auth middleware | Done | JWT verification + database-backed tenancy and roles |
-| PostgreSQL schema | Done | 9 tables in `backend/models.py`, applied by bootstrap |
+| PostgreSQL schema | Done | 13 tenant tables + `webhook_events` idempotency store in `backend/models.py` |
 | RLS policies | Done | FORCE RLS, fail-closed, on every tenant table |
 | Non-superuser app role | Done | `thesa_app` with least-privilege grants |
-| Immutable audit trail | Done | Trigger-written, append-only, actor-attributed |
+| Immutable audit trail | Done | Trigger-written, append-only, actor-attributed; issued-card tokens redacted from audit JSON |
 | Reward Router engine | Done | Spend aggregation, classifier, recommendations, ledger |
 | Budgets / per diems / transactions | Done | CRUD with month-to-date and remaining-today views |
 | Role-based access | Done | owner / office_manager / crew_lead per endpoint |
 | Security headers + rate limiting | Done | Per-user/IP sliding windows, tighter on sensitive writes |
 | Onboarding | Done | Atomic company + owner via SECURITY DEFINER function |
 | Team invites & join | Done | Invite by email + role, revoke, join via server-side verified Clerk email; users and invites audited |
-| Isolation verification | Done | `verify_isolation.py` — 9 active attack checks, all passing |
-| API flow verification | Done | `verify_api_flows.py` — 37 end-to-end HTTP checks (auth, team, budgets, per diems, router, isolation, rate limits) |
+| Isolation verification | Done | `verify_isolation.py` — cross-tenant + audit + issued-card token redaction checks |
+| API flow verification | Done | `verify_api_flows.py` — 50 end-to-end HTTP checks (auth, team, budgets, router, Card Teller, webhook, rate limits) |
+| Next.js Command Center | Done | `frontend/` — Clerk sign-in, onboarding, overview, Reward Router, transactions, budgets, cards, team; role-aware UI |
+| CORS allowlist | Done | Single-origin allowlist, bearer-token only, no credentials |
+| Card Teller policy engine | Done | Vendor/category scope, single-tx limit, budget, per diem, spend policies; fail-closed |
+| Issued cards (stub issuer) | Done | Provision / freeze / cancel via `issuing_stub`; network token + last4 only (no PAN) |
+| JIT webhook | Done | HMAC + timestamp skew + event_id replay; stub payload shape ready for Marqeta |
+| Spend policies | Done | Denied categories + max transaction; audited |
 | Configuration | Done | Pydantic settings; separate runtime/admin DB roles |
 | Dev token helper | Done | Browser-based Clerk sign-in for testing |
 
@@ -593,13 +639,12 @@ A standalone HTML page for local development that:
 
 | Component | Status |
 |-----------|--------|
-| Marqeta integration (JIT webhooks) | Deferred — next up |
-| Card Teller policy engine | Deferred — next up |
-| Thesa-issued card provisioning | Deferred — next up |
+| Marqeta integration (live issuer) | Next — swap stub; Card Teller + webhook contract already in place |
+| Edge mTLS / IP allowlisting for webhooks | Required before production |
 | Alembic migrations | Not started (bootstrap uses create_all) |
 | Redis-backed rate limiting (multi-replica) | Not started |
 | Receipt parsing workers | Not started |
-| Next.js Command Center | Not started |
+| Command Center issuance UI | API ready; UI not started |
 | iOS field client | Not started |
 | pytest suite & CI/CD | Not started |
 | Docker / deployment configs | Not started |
@@ -609,7 +654,7 @@ A standalone HTML page for local development that:
 ## Roadmap
 
 ### Phase 1 — Database Foundation (done, except migrations)
-- [x] PostgreSQL schema (companies, users, portfolio_cards, reward_rules, transactions, budgets, per_diems, routing_decisions, audit_log)
+- [x] PostgreSQL schema (companies, users, invites, portfolio_cards, reward_rules, transactions, budgets, per_diems, routing_decisions, spend_policies, issued_cards, authorization_decisions, webhook_events, audit_log)
 - [x] RLS policies on all tenant-scoped tables (fail-closed, FORCE)
 - [x] `company_id` lookup from database (public metadata extraction removed)
 - [ ] Alembic migration setup (bootstrap currently uses create_all)
@@ -621,28 +666,32 @@ A standalone HTML page for local development that:
 - [x] Rewards ledger tracking value created per routing decision (billing basis)
 - [ ] Automatic routing enforcement (requires Card Teller / issued cards)
 
-### Phase 3 — Card Issuing & Policy Engine
-- Marqeta JIT funding webhook receiver
-- Card Teller policy engine (vendor approval → budget check → per diem check → policy eval → approve/decline)
-- Field card provisioning (crew lead requests a scoped card, issued in seconds)
-- Physical card lifecycle management
+### Phase 3 — Card Issuing & Policy Engine (stub done; Marqeta next)
+- [x] Card Teller policy engine (status → expiry → limit → vendor/category → policy → budget → per diem → approve/decline)
+- [x] Field card provisioning API (scoped virtual cards via stub issuer)
+- [x] JIT webhook receiver (HMAC signature, timestamp skew, event_id replay, fail-closed)
+- [x] Spend policies + authorization decision history
+- [ ] Marqeta live issuer swap (`issuing_stub` → Marqeta client)
+- [ ] Physical card lifecycle management
+- [ ] Edge mTLS / IP allowlisting for webhook traffic
 
 ### Phase 4 — Receipt & Expense Automation
 - Mobile receipt capture and upload at the point of sale
 - Gmail API OAuth integration for receipt scanning
 - Background worker for PDF extraction and transaction matching
 
-### Phase 5 — Client Applications
-- Next.js Command Center (Reward Router insights, transaction log, job-level budgets, card controls)
-- iOS field client (scoped card requests, per diem and job budget views, receipt capture)
+### Phase 5 — Client Applications (Command Center done)
+- [x] Next.js Command Center (Reward Router insights, transaction log, job-level budgets, team & per diem management)
+- [ ] Command Center card issuance controls UI (API ready; waiting on Marqeta for production)
+- [ ] iOS field client (scoped card requests, per diem and job budget views, receipt capture)
 
 ### Phase 6 — Testing & Hardening
-- Tenant isolation test suite (cross-tenant access attempts)
-- Webhook signature verification tests
-- Policy engine decision tests
-- Reward Router regression tests against known card portfolios
-- CI/CD pipeline (bandit, safety, pytest)
+- [x] Tenant isolation verification script (`verify_isolation.py`)
+- [x] Webhook signature + Card Teller decision checks (`verify_api_flows.py`)
+- [ ] Migrate verification scripts to pytest + CI
+- [ ] Reward Router regression tests against known card portfolios
+- [ ] CI/CD pipeline (bandit, safety, pytest)
 
 ---
 
-*Last updated: July 28, 2026*
+*Last updated: July 30, 2026*

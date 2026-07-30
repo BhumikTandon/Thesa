@@ -78,6 +78,18 @@ class InviteStatus(str, enum.Enum):
     REVOKED = "revoked"
 
 
+class IssuedCardStatus(str, enum.Enum):
+    REQUESTED = "requested"
+    ACTIVE = "active"
+    FROZEN = "frozen"
+    CANCELED = "canceled"
+
+
+class AuthDecision(str, enum.Enum):
+    APPROVED = "approved"
+    DECLINED = "declined"
+
+
 class Company(Base):
     __tablename__ = "companies"
 
@@ -256,7 +268,7 @@ class PerDiem(Base):
 
 
 class Transaction(Base):
-    """A purchase record. Manually entered for now; Marqeta feed comes later."""
+    """A purchase record. Manual entry or written by an approved JIT auth."""
 
     __tablename__ = "transactions"
     __table_args__ = (
@@ -275,6 +287,9 @@ class Transaction(Base):
     portfolio_card_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("portfolio_cards.id")
     )
+    issued_card_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("issued_cards.id")
+    )
     budget_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("budgets.id")
     )
@@ -285,6 +300,139 @@ class Transaction(Base):
         String(3), nullable=False, server_default=text("'USD'")
     )
     occurred_on: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class SpendPolicy(Base):
+    """Company-wide spend rule evaluated by the Card Teller.
+
+    Any matching deny wins (fail closed). `denied_categories` is a JSON array
+    of category strings; empty means no category denials from this row.
+    """
+
+    __tablename__ = "spend_policies"
+    __table_args__ = (
+        CheckConstraint(
+            "max_transaction_cents IS NULL OR max_transaction_cents > 0",
+            name="ck_spend_policies_max_positive",
+        ),
+        Index("ix_spend_policies_company_id", "company_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    denied_categories: Mapped[list] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    max_transaction_cents: Mapped[int | None] = mapped_column(BigInteger)
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = _created_at()
+
+
+class IssuedCard(Base):
+    """A Thesa-issued virtual card scoped to a vendor/category/budget.
+
+    Never stores a PAN — only the issuer's network token (`external_token`)
+    and last4. Today the issuer is a local stub; Marqeta swaps in later
+    behind the same interface.
+    """
+
+    __tablename__ = "issued_cards"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('requested', 'active', 'frozen', 'canceled')",
+            name="ck_issued_cards_status",
+        ),
+        CheckConstraint(
+            "char_length(last4) = 4", name="ck_issued_cards_last4"
+        ),
+        CheckConstraint(
+            "single_tx_limit_cents IS NULL OR single_tx_limit_cents > 0",
+            name="ck_issued_cards_limit_positive",
+        ),
+        UniqueConstraint(
+            "external_token", name="uq_issued_cards_external_token"
+        ),
+        Index("ix_issued_cards_company_id", "company_id"),
+        Index("ix_issued_cards_external_token", "external_token"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    budget_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("budgets.id")
+    )
+    label: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Opaque issuer reference (network token / stub id). Never a PAN.
+    external_token: Mapped[str] = mapped_column(String(128), nullable=False)
+    last4: Mapped[str] = mapped_column(String(4), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'active'")
+    )
+    # Optional scopes: null means unrestricted on that axis.
+    scoped_vendor: Mapped[str | None] = mapped_column(String(200))
+    scoped_category: Mapped[str | None] = mapped_column(String(20))
+    single_tx_limit_cents: Mapped[int | None] = mapped_column(BigInteger)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = _created_at()
+
+
+class AuthorizationDecision(Base):
+    """Outcome of one Card Teller evaluation on a JIT authorization request."""
+
+    __tablename__ = "authorization_decisions"
+    __table_args__ = (
+        CheckConstraint(
+            "decision IN ('approved', 'declined')",
+            name="ck_authorization_decisions_decision",
+        ),
+        CheckConstraint(
+            "amount_cents > 0", name="ck_authorization_decisions_amount_positive"
+        ),
+        UniqueConstraint(
+            "event_id", name="uq_authorization_decisions_event_id"
+        ),
+        Index("ix_authorization_decisions_company_id", "company_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id"), nullable=False
+    )
+    issued_card_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("issued_cards.id"), nullable=False
+    )
+    event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    merchant_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    category: Mapped[str] = mapped_column(String(20), nullable=False)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    reason: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class WebhookEvent(Base):
+    """Idempotency store for JIT webhook event IDs (replay protection).
+
+    Not tenant-scoped: events arrive before tenant context is known. Holds
+    only the event id and outcome — never the raw payload.
+    """
+
+    __tablename__ = "webhook_events"
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    decision: Mapped[str | None] = mapped_column(String(20))
+    reason: Mapped[str | None] = mapped_column(String(200))
     created_at: Mapped[datetime] = _created_at()
 
 

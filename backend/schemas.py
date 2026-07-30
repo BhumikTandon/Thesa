@@ -11,7 +11,14 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend.models import InviteStatus, Role, RoutingStatus, SpendCategory
+from backend.models import (
+    AuthDecision,
+    InviteStatus,
+    IssuedCardStatus,
+    Role,
+    RoutingStatus,
+    SpendCategory,
+)
 
 
 class StrictModel(BaseModel):
@@ -186,6 +193,7 @@ class TransactionOut(BaseModel):
     id: uuid.UUID
     user_id: uuid.UUID | None
     portfolio_card_id: uuid.UUID | None
+    issued_card_id: uuid.UUID | None
     budget_id: uuid.UUID | None
     merchant_name: str
     category: SpendCategory
@@ -240,3 +248,86 @@ class RewardsLedgerOut(BaseModel):
     accepted_decisions: int
     est_monthly_uplift_cents: int
     est_annual_uplift_cents: int
+
+
+# ---------------------------------------------------------------------------
+# Spend policies / issued cards / Card Teller
+# ---------------------------------------------------------------------------
+
+
+class SpendPolicyCreate(StrictModel):
+    name: str = Field(min_length=1, max_length=200)
+    denied_categories: list[SpendCategory] = Field(default_factory=list, max_length=10)
+    max_transaction_cents: int | None = Field(default=None, gt=0, le=_MAX_CENTS)
+
+
+class SpendPolicyUpdate(StrictModel):
+    denied_categories: list[SpendCategory] | None = Field(default=None, max_length=10)
+    max_transaction_cents: int | None = Field(default=None, gt=0, le=_MAX_CENTS)
+    active: bool | None = None
+
+
+class SpendPolicyOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    denied_categories: list[SpendCategory]
+    max_transaction_cents: int | None
+    active: bool
+    created_at: datetime
+
+
+class IssuedCardCreate(StrictModel):
+    """Request a scoped virtual card for a field employee."""
+
+    label: str = Field(min_length=1, max_length=200)
+    user_id: uuid.UUID | None = None  # defaults to caller
+    budget_id: uuid.UUID | None = None
+    scoped_vendor: str | None = Field(default=None, max_length=200)
+    scoped_category: SpendCategory | None = None
+    single_tx_limit_cents: int | None = Field(default=None, gt=0, le=_MAX_CENTS)
+    expires_at: datetime | None = None
+
+
+class IssuedCardUpdate(StrictModel):
+    status: IssuedCardStatus
+
+
+class IssuedCardOut(BaseModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    budget_id: uuid.UUID | None
+    label: str
+    last4: str
+    status: IssuedCardStatus
+    scoped_vendor: str | None
+    scoped_category: SpendCategory | None
+    single_tx_limit_cents: int | None
+    expires_at: datetime | None
+    created_at: datetime
+
+
+class AuthorizationDecisionOut(BaseModel):
+    id: uuid.UUID
+    issued_card_id: uuid.UUID
+    event_id: str
+    merchant_name: str
+    category: SpendCategory
+    amount_cents: int
+    decision: AuthDecision
+    reason: str
+    created_at: datetime
+
+
+class JitWebhookIn(StrictModel):
+    """Signed JIT authorization payload (validated only after HMAC passes)."""
+
+    event_id: str = Field(min_length=1, max_length=128)
+    external_token: str = Field(min_length=1, max_length=128)
+    merchant_name: str = Field(min_length=1, max_length=200)
+    amount_cents: int = Field(gt=0, le=_MAX_CENTS)
+
+
+class JitWebhookResponse(BaseModel):
+    decision: AuthDecision
+    reason: str
+
