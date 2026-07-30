@@ -223,7 +223,12 @@ All authenticated endpoints require a valid Clerk bearer token; tenancy and role
 |--------|------|------|-------------|
 | `GET` | `/health` | public | Health check |
 | `POST` | `/onboarding` | authed, no company yet | Create company + owner atomically |
+| `POST` | `/join` | authed, no company yet | Join a company via pending invite (email verified server-side with Clerk) |
 | `GET` | `/me` | any | Caller's identity and role (DB-resolved) |
+| `GET` | `/team/members` | any | List company members |
+| `GET` | `/team/invites` | mgr | List invites |
+| `POST` | `/team/invites` | mgr | Invite by email + role (owner invites require owner) |
+| `POST` | `/team/invites/{id}/revoke` | mgr | Revoke a pending invite |
 | `GET` | `/portfolio-cards` | any | List the company's cards with reward rules |
 | `POST` | `/portfolio-cards` | mgr | Register an existing corporate card (+ category earn rates) |
 | `PATCH` | `/portfolio-cards/{id}` | mgr | Activate/deactivate a card |
@@ -484,6 +489,7 @@ The following are **blocking** for any production traffic. Done: RLS with fail-c
 
 - `companies` — tenant organizations
 - `users` — employees within companies (owner / office_manager / crew_lead), keyed to Clerk by `clerk_user_id`
+- `invites` — pending/accepted/revoked team invitations (lowercased email, one pending per company+email)
 - `portfolio_cards` — the company's existing corporate cards with default percent-back (input to the Reward Router)
 - `reward_rules` — category-specific earn rates per portfolio card (e.g. fuel → 4%)
 - `budgets` — job-site and departmental monthly spending limits (integer cents)
@@ -577,7 +583,9 @@ A standalone HTML page for local development that:
 | Role-based access | Done | owner / office_manager / crew_lead per endpoint |
 | Security headers + rate limiting | Done | Per-user/IP sliding windows, tighter on sensitive writes |
 | Onboarding | Done | Atomic company + owner via SECURITY DEFINER function |
+| Team invites & join | Done | Invite by email + role, revoke, join via server-side verified Clerk email; users and invites audited |
 | Isolation verification | Done | `verify_isolation.py` — 9 active attack checks, all passing |
+| API flow verification | Done | `verify_api_flows.py` — 37 end-to-end HTTP checks (auth, team, budgets, per diems, router, isolation, rate limits) |
 | Configuration | Done | Pydantic settings; separate runtime/admin DB roles |
 | Dev token helper | Done | Browser-based Clerk sign-in for testing |
 

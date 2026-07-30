@@ -43,8 +43,9 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 - [x] **Transactions** — manual entry (auto-categorized) and listing; seeds the Reward Router until the card feed lands
 - [x] **Role-based access** — owner / office_manager / crew_lead with per-endpoint enforcement
 - [x] **Security middleware** — security headers on every response, tiered rate limiting (per-user, per-IP, tighter on money-adjacent writes) with 429 + Retry-After
-- [x] **Onboarding** — atomic company + owner creation via SECURITY DEFINER function
+- [x] **Onboarding & team** — atomic company + owner creation; email invites with roles, revocation, and join flow (invitee's email verified server-side with Clerk, never client-supplied)
 - [x] **Isolation verification** — `backend/db/verify_isolation.py` actively attempts cross-tenant reads/writes and audit tampering as the non-superuser role
+- [x] **API flow verification** — `backend/verify_api_flows.py` runs 37 end-to-end HTTP checks across every feature with only the Clerk network boundary faked
 - [x] **Configuration & workspace rules** — Pydantic settings, `.cursor/rules/` conventions
 
 ## What's Next

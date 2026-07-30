@@ -18,6 +18,7 @@ from clerk_backend_api.security.types import AuthenticateRequestOptions
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
@@ -27,7 +28,7 @@ from backend.db.session import get_session_factory
 _PUBLIC_PATHS: set[str] = {"/health", "/docs", "/openapi.json", "/redoc"}
 
 # Paths reachable by an authenticated Clerk user who has no company yet.
-_ONBOARDING_PATHS: set[str] = {"/onboarding"}
+_ONBOARDING_PATHS: set[str] = {"/onboarding", "/join"}
 
 
 def _to_httpx_request(request: Request) -> httpx.Request:
@@ -76,7 +77,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
 
         httpx_request = _to_httpx_request(request)
-        request_state = self._clerk.authenticate_request(
+        # The Clerk SDK call is synchronous (and may fetch JWKS over the
+        # network); run it in a worker thread so it never blocks the event
+        # loop for other in-flight requests.
+        request_state = await run_in_threadpool(
+            self._clerk.authenticate_request,
             httpx_request,
             AuthenticateRequestOptions(),
         )

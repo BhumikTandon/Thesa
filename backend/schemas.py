@@ -9,9 +9,9 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from backend.models import Role, RoutingStatus, SpendCategory
+from backend.models import InviteStatus, Role, RoutingStatus, SpendCategory
 
 
 class StrictModel(BaseModel):
@@ -39,6 +39,38 @@ class MeResponse(BaseModel):
     company_id: uuid.UUID
     clerk_user_id: str
     role: Role
+
+
+# ---------------------------------------------------------------------------
+# Team
+# ---------------------------------------------------------------------------
+
+_EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
+
+class InviteCreate(StrictModel):
+    email: str = Field(max_length=320, pattern=_EMAIL_PATTERN)
+    role: Role
+
+    @field_validator("email")
+    @classmethod
+    def _lowercase(cls, value: str) -> str:
+        return value.lower()
+
+
+class InviteOut(BaseModel):
+    id: uuid.UUID
+    email: str
+    role: Role
+    status: InviteStatus
+    created_at: datetime
+
+
+class MemberOut(BaseModel):
+    id: uuid.UUID
+    email: str | None
+    role: Role
+    created_at: datetime
 
 
 # ---------------------------------------------------------------------------

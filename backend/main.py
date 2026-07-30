@@ -3,7 +3,15 @@ import uuid
 from fastapi import FastAPI, Request
 
 from backend.auth.middleware import AuthMiddleware
-from backend.routes import budgets, onboarding, per_diems, portfolio, routing, transactions
+from backend.routes import (
+    budgets,
+    onboarding,
+    per_diems,
+    portfolio,
+    routing,
+    team,
+    transactions,
+)
 from backend.schemas import MeResponse
 from backend.security import RateLimitMiddleware, SecurityHeadersMiddleware
 
@@ -18,6 +26,7 @@ app.add_middleware(AuthMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(onboarding.router)
+app.include_router(team.router)
 app.include_router(portfolio.router)
 app.include_router(budgets.router)
 app.include_router(per_diems.router)

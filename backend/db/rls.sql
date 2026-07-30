@@ -39,7 +39,7 @@ DECLARE
     t text;
 BEGIN
     FOREACH t IN ARRAY ARRAY[
-        'users', 'portfolio_cards', 'reward_rules', 'budgets',
+        'users', 'invites', 'portfolio_cards', 'reward_rules', 'budgets',
         'per_diems', 'transactions', 'routing_decisions'
     ]
     LOOP
@@ -124,15 +124,15 @@ BEGIN
     RETURN NEW;
 END $$;
 
--- Audited tables per the security rule: every budget, limit, card, and
--- routing change is recorded immutably.
+-- Audited tables per the security rule: every budget, limit, card, routing,
+-- and membership/role change is recorded immutably.
 DO $$
 DECLARE
     t text;
 BEGIN
     FOREACH t IN ARRAY ARRAY[
         'budgets', 'per_diems', 'portfolio_cards', 'reward_rules',
-        'routing_decisions'
+        'routing_decisions', 'users', 'invites'
     ]
     LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS %I_audit ON %I', t, t);
@@ -190,4 +190,44 @@ BEGIN
     RETURNING id INTO v_user_id;
 
     RETURN QUERY SELECT v_company_id, v_user_id;
+END $$;
+
+-- Join a company via a pending invite. The email is the caller's *verified*
+-- Clerk email fetched server-side, never client-supplied. Oldest pending
+-- invite wins when multiple companies invited the same address.
+CREATE OR REPLACE FUNCTION accept_invite(
+    p_clerk_user_id text,
+    p_email text
+)
+RETURNS TABLE (company_id uuid, user_id uuid, role text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+    v_invite invites%ROWTYPE;
+    v_user_id uuid;
+BEGIN
+    IF EXISTS (SELECT 1 FROM users u WHERE u.clerk_user_id = p_clerk_user_id) THEN
+        RAISE EXCEPTION 'user already belongs to a company'
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    SELECT * INTO v_invite
+    FROM invites i
+    WHERE i.email = lower(p_email) AND i.status = 'pending'
+    ORDER BY i.created_at ASC
+    LIMIT 1;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no pending invite for this email'
+            USING ERRCODE = 'no_data_found';
+    END IF;
+
+    INSERT INTO users (company_id, clerk_user_id, email, role)
+    VALUES (v_invite.company_id, p_clerk_user_id, lower(p_email), v_invite.role)
+    RETURNING id INTO v_user_id;
+
+    UPDATE invites
+    SET status = 'accepted', accepted_at = now()
+    WHERE id = v_invite.id;
+
+    RETURN QUERY SELECT v_invite.company_id, v_user_id, v_invite.role::text;
 END $$;

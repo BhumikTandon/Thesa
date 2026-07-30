@@ -63,6 +63,22 @@ async def record_decision(
             detail="Recommendation has changed; refresh and retry",
         )
 
+    # The ledger sums accepted decisions (billing basis), so accepting the
+    # same vendor twice would double-count uplift.
+    existing = (
+        await session.execute(
+            select(RoutingDecision.id).where(
+                func.lower(RoutingDecision.vendor_name) == rec.vendor_name.strip().lower(),
+                RoutingDecision.status == RoutingStatus.ACCEPTED.value,
+            )
+        )
+    ).first()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="An accepted routing decision already exists for this vendor",
+        )
+
     decision = RoutingDecision(
         company_id=uuid.UUID(request.state.company_id),
         vendor_name=rec.vendor_name,

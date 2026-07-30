@@ -72,6 +72,12 @@ class RoutingStatus(str, enum.Enum):
     DISMISSED = "dismissed"
 
 
+class InviteStatus(str, enum.Enum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    REVOKED = "revoked"
+
+
 class Company(Base):
     __tablename__ = "companies"
 
@@ -98,6 +104,51 @@ class User(Base):
     clerk_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     email: Mapped[str | None] = mapped_column(String(320))
     role: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class Invite(Base):
+    """An invitation for an employee to join a company.
+
+    Emails are stored lowercased. At most one pending invite per
+    (company, email); joining matches the authenticated user's verified Clerk
+    email against pending invites via the SECURITY DEFINER `accept_invite`
+    function.
+    """
+
+    __tablename__ = "invites"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('owner', 'office_manager', 'crew_lead')",
+            name="ck_invites_role",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'accepted', 'revoked')",
+            name="ck_invites_status",
+        ),
+        Index(
+            "uq_invites_pending_email",
+            "company_id",
+            "email",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index("ix_invites_company_id", "company_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("companies.id"), nullable=False
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=text("'pending'")
+    )
+    invited_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = _created_at()
 
 

@@ -56,6 +56,7 @@ _SENSITIVE_PREFIXES = (
     "/budgets",
     "/per-diems",
     "/routing",
+    "/team",
 )
 
 

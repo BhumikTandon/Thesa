@@ -19,7 +19,7 @@ END $$;
 GRANT USAGE ON SCHEMA public TO thesa_app;
 
 GRANT SELECT, INSERT, UPDATE ON
-    companies, users, portfolio_cards, reward_rules, budgets,
+    companies, users, invites, portfolio_cards, reward_rules, budgets,
     per_diems, transactions, routing_decisions
 TO thesa_app;
 
@@ -32,4 +32,5 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO thesa_app;
 
 GRANT EXECUTE ON FUNCTION resolve_user(text) TO thesa_app;
 GRANT EXECUTE ON FUNCTION create_company_with_owner(text, text, text) TO thesa_app;
+GRANT EXECUTE ON FUNCTION accept_invite(text, text) TO thesa_app;
 GRANT EXECUTE ON FUNCTION current_tenant() TO thesa_app;
