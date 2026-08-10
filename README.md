@@ -46,9 +46,10 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 - [x] **Onboarding & team** — atomic company + owner creation; email invites with roles, revocation, and join flow (invitee's email verified server-side with Clerk, never client-supplied)
 - [x] **Isolation verification** — `backend/db/verify_isolation.py` actively attempts cross-tenant reads/writes and audit tampering as the non-superuser role
 - [x] **API flow verification** — `backend/verify_api_flows.py` runs 50 end-to-end HTTP checks across every feature with only the Clerk network boundary faked
-- [x] **Command Center (web)** — Next.js 16 dashboard in `frontend/`: Clerk sign-in, onboarding (create company / join via invite), overview, Reward Router (recommendations, accept/dismiss, ledger), transactions, budgets, card portfolio, and team pages with role-aware UI
+- [x] **Command Center (web)** — Next.js 16 dashboard in `frontend/`: Clerk sign-in, onboarding, overview, Reward Router, transactions, budgets, card portfolio, issued cards, spend policies, authorizations, and team pages with role-aware UI
 - [x] **CORS allowlist** — explicit single-origin allowlist on the API, bearer-token only (no cookies/credentials)
 - [x] **Card Teller & issued cards** — scoped virtual card provisioning (stub issuer), spend policies, JIT webhook with HMAC + replay protection, fail-closed authorize/decline loop (status → expiry → limit → vendor/category → policy → budget → per diem)
+- [x] **Alembic migrations** — `alembic upgrade head` for DDL; `python -m backend.db.bootstrap` then applies RLS + grants
 - [x] **Configuration & workspace rules** — Pydantic settings, `.cursor/rules/` conventions
 
 ## What's Next
@@ -57,10 +58,9 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 - [ ] Swap `issuing_stub` for Marqeta JIT funding (same Card Teller + webhook contract)
 - [ ] Mutual TLS / IP allowlisting at the edge for webhook traffic
 - [ ] Field card provisioning UX polish + physical card lifecycle
-- [ ] Command Center issuance controls UI (API ready)
 
 ### Infrastructure
-- [ ] Alembic migrations (replace create_all bootstrap)
+- [x] Alembic migrations (replace create_all bootstrap)
 - [ ] Redis-backed rate limiting for multi-replica deployments
 - [ ] CI/CD pipeline — `bandit` for static analysis, `safety` for dependency scanning, `pytest` on every commit
 
@@ -74,8 +74,8 @@ PostgreSQL RLS policies evaluate this session variable to filter rows. The datab
 - [x] Reward Router insights — rewards earned vs. baseline, routing recommendations awaiting approval
 - [x] Company-wide transaction log viewer
 - [x] Crew and job-level budget management (e.g., "$10,000/mo for the Henderson job site")
-- [ ] Card issuance and limit controls UI (API ready; blocked on Marqeta swap for production)
-- [ ] Flagged out-of-policy transaction review UI (authorization decisions API ready)
+- [x] Card issuance and limit controls UI (stub issuer; Marqeta swap for production)
+- [x] Flagged out-of-policy authorization review UI
 
 ### Field Client (iOS)
 - [ ] Scoped card request flow — crew lead picks a vendor, gets a funded card in seconds
@@ -101,9 +101,11 @@ export DATABASE_URL="postgresql+asyncpg://thesa_app@localhost:5432/thesa"
 # Privileged role for schema bootstrap only
 export DATABASE_ADMIN_URL="postgresql+asyncpg://$(whoami)@localhost:5432/thesa"
 
-# Create the database, apply schema + RLS + audit triggers + grants
+# Create the database, run Alembic migrations, then RLS + audit triggers + grants
 createdb thesa
 python -m backend.db.bootstrap
+# Or migrations alone:
+# alembic upgrade head
 
 # Verify tenant isolation and audit immutability
 python -m backend.db.verify_isolation

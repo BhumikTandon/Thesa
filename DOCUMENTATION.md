@@ -147,8 +147,11 @@ Thesa/
 │       ├── sign-in/             # Clerk-hosted sign-in component
 │       ├── onboarding/          # Create company or join via invite
 │       └── (dashboard)/         # Sidebar shell: overview, router, transactions,
-│                                #   budgets, cards, team (role-aware UI)
+│                                #   budgets, cards, issued-cards, policies,
+│                                #   authorizations, team (role-aware UI)
+├── alembic.ini                  # Alembic config (DDL via DATABASE_ADMIN_URL)
 └── backend/
+    ├── alembic/                 # Migration env + versions/
     ├── __init__.py              # Package marker
     ├── main.py                  # FastAPI app: middleware stack + router registration
     ├── config.py                # Pydantic settings (runtime + admin DB URLs, Clerk key)
@@ -163,7 +166,7 @@ Thesa/
     │   ├── session.py           # Tenant-scoped sessions (set_config for RLS + audit actor)
     │   ├── rls.sql              # RLS policies, audit triggers, auth functions
     │   ├── grants.sql           # Least-privilege thesa_app role grants
-    │   ├── bootstrap.py         # Apply schema + rls.sql + grants.sql
+    │   ├── bootstrap.py         # alembic upgrade head, then rls.sql + grants.sql
     │   └── verify_isolation.py  # Active cross-tenant attack verification
     ├── services/
     │   ├── vendor_classifier.py # Keyword merchant → category classifier
@@ -626,7 +629,8 @@ A standalone HTML page for local development that:
 | Team invites & join | Done | Invite by email + role, revoke, join via server-side verified Clerk email; users and invites audited |
 | Isolation verification | Done | `verify_isolation.py` — cross-tenant + audit + issued-card token redaction checks |
 | API flow verification | Done | `verify_api_flows.py` — 50 end-to-end HTTP checks (auth, team, budgets, router, Card Teller, webhook, rate limits) |
-| Next.js Command Center | Done | `frontend/` — Clerk sign-in, onboarding, overview, Reward Router, transactions, budgets, cards, team; role-aware UI |
+| Next.js Command Center | Done | `frontend/` — overview, router, transactions, budgets, portfolio + issued cards, spend policies, authorizations, team |
+| Alembic migrations | Done | `alembic upgrade head` for DDL; bootstrap applies RLS + grants after |
 | CORS allowlist | Done | Single-origin allowlist, bearer-token only, no credentials |
 | Card Teller policy engine | Done | Vendor/category scope, single-tx limit, budget, per diem, spend policies; fail-closed |
 | Issued cards (stub issuer) | Done | Provision / freeze / cancel via `issuing_stub`; network token + last4 only (no PAN) |
@@ -641,10 +645,10 @@ A standalone HTML page for local development that:
 |-----------|--------|
 | Marqeta integration (live issuer) | Next — swap stub; Card Teller + webhook contract already in place |
 | Edge mTLS / IP allowlisting for webhooks | Required before production |
-| Alembic migrations | Not started (bootstrap uses create_all) |
+| Alembic migrations | Done — `alembic upgrade head`; bootstrap applies RLS/grants after |
 | Redis-backed rate limiting (multi-replica) | Not started |
 | Receipt parsing workers | Not started |
-| Command Center issuance UI | API ready; UI not started |
+| Command Center issuance UI | Done (stub issuer) |
 | iOS field client | Not started |
 | pytest suite & CI/CD | Not started |
 | Docker / deployment configs | Not started |
@@ -653,11 +657,11 @@ A standalone HTML page for local development that:
 
 ## Roadmap
 
-### Phase 1 — Database Foundation (done, except migrations)
+### Phase 1 — Database Foundation (done)
 - [x] PostgreSQL schema (companies, users, invites, portfolio_cards, reward_rules, transactions, budgets, per_diems, routing_decisions, spend_policies, issued_cards, authorization_decisions, webhook_events, audit_log)
 - [x] RLS policies on all tenant-scoped tables (fail-closed, FORCE)
 - [x] `company_id` lookup from database (public metadata extraction removed)
-- [ ] Alembic migration setup (bootstrap currently uses create_all)
+- [x] Alembic migration setup (`alembic upgrade head`; bootstrap applies rls.sql + grants.sql)
 
 ### Phase 2 — Reward Router (done; auto-routing awaits card issuing)
 - [x] Card portfolio registration with reward multiplier categories
@@ -680,9 +684,9 @@ A standalone HTML page for local development that:
 - Gmail API OAuth integration for receipt scanning
 - Background worker for PDF extraction and transaction matching
 
-### Phase 5 — Client Applications (Command Center done)
-- [x] Next.js Command Center (Reward Router insights, transaction log, job-level budgets, team & per diem management)
-- [ ] Command Center card issuance controls UI (API ready; waiting on Marqeta for production)
+### Phase 5 — Client Applications (Command Center done; iOS next)
+- [x] Next.js Command Center (Reward Router, transactions, budgets, team, issued cards, spend policies, authorizations)
+- [x] Command Center card issuance controls UI (stub issuer; Marqeta for production)
 - [ ] iOS field client (scoped card requests, per diem and job budget views, receipt capture)
 
 ### Phase 6 — Testing & Hardening
@@ -694,4 +698,4 @@ A standalone HTML page for local development that:
 
 ---
 
-*Last updated: July 30, 2026*
+*Last updated: August 9, 2026*

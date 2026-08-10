@@ -1,10 +1,14 @@
-"""Apply the database schema: tables, then RLS policies and audit triggers.
+"""Apply schema migrations, then RLS policies and audit triggers.
 
 Usage:
     python -m backend.db.bootstrap
 
-Idempotent: tables use CREATE TABLE IF NOT EXISTS semantics via metadata
-create_all, and rls.sql uses CREATE OR REPLACE / DROP IF EXISTS throughout.
+Flow:
+  1. `alembic upgrade head` against DATABASE_ADMIN_URL (table DDL)
+  2. Apply backend/db/rls.sql and grants.sql (policies, triggers, role)
+
+Idempotent: Alembic no-ops when already at head; rls.sql / grants.sql use
+CREATE OR REPLACE / DROP IF EXISTS throughout.
 
 Note: the role running this script owns the SECURITY DEFINER auth functions
 in rls.sql. In development that is typically the local superuser; in
@@ -13,35 +17,43 @@ connect the application as a separate non-superuser role.
 """
 
 import asyncio
+import subprocess
+import sys
 from pathlib import Path
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from backend.config import get_settings
-from backend.models import Base
 
 _SQL_DIR = Path(__file__).parent
 _SQL_FILES = ("rls.sql", "grants.sql")
+_ROOT = Path(__file__).resolve().parents[2]
+_ALEMBIC_INI = _ROOT / "alembic.ini"
 
 
-async def bootstrap() -> None:
+def _run_alembic_upgrade() -> None:
+    # Run in a subprocess so Alembic's own asyncio.run does not nest inside
+    # this process's event loop.
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "alembic",
+            "-c",
+            str(_ALEMBIC_INI),
+            "upgrade",
+            "head",
+        ],
+        cwd=str(_ROOT),
+        check=True,
+    )
+
+
+async def _apply_rls_and_grants() -> None:
     settings = get_settings()
     engine = create_async_engine(settings.admin_url)
 
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
-        # create_all does not ALTER existing tables. Add columns introduced
-        # after the initial schema so re-bootstrap on a live DB stays safe.
-        await conn.execute(
-            text(
-                "ALTER TABLE transactions "
-                "ADD COLUMN IF NOT EXISTS issued_card_id UUID "
-                "REFERENCES issued_cards(id)"
-            )
-        )
-
         # The SQL files contain DO $$ blocks and multi-statement scripts, so
         # they are executed through the asyncpg driver's simple-query protocol
         # rather than as individual prepared statements.
@@ -50,8 +62,13 @@ async def bootstrap() -> None:
             await raw.driver_connection.execute((_SQL_DIR / sql_file).read_text())
 
     await engine.dispose()
-    print("Schema, RLS policies, audit triggers, and grants applied.")
+
+
+def bootstrap() -> None:
+    _run_alembic_upgrade()
+    asyncio.run(_apply_rls_and_grants())
+    print("Migrations, RLS policies, audit triggers, and grants applied.")
 
 
 if __name__ == "__main__":
-    asyncio.run(bootstrap())
+    bootstrap()

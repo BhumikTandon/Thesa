@@ -12,6 +12,9 @@ const NAV = [
   { href: "/transactions", label: "Transactions" },
   { href: "/budgets", label: "Budgets" },
   { href: "/cards", label: "Card Portfolio" },
+  { href: "/issued-cards", label: "Issued Cards" },
+  { href: "/policies", label: "Spend Policies" },
+  { href: "/authorizations", label: "Authorizations" },
   { href: "/team", label: "Team" },
 ];
 

@@ -114,3 +114,46 @@ export interface PerDiemStatus {
   spent_today_cents: number;
   remaining_today_cents: number;
 }
+
+export type IssuedCardStatus =
+  | "requested"
+  | "active"
+  | "frozen"
+  | "canceled";
+
+export type AuthDecision = "approved" | "declined";
+
+export interface IssuedCard {
+  id: string;
+  user_id: string;
+  budget_id: string | null;
+  label: string;
+  last4: string;
+  status: IssuedCardStatus;
+  scoped_vendor: string | null;
+  scoped_category: SpendCategory | null;
+  single_tx_limit_cents: number | null;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface SpendPolicy {
+  id: string;
+  name: string;
+  denied_categories: SpendCategory[];
+  max_transaction_cents: number | null;
+  active: boolean;
+  created_at: string;
+}
+
+export interface AuthorizationDecision {
+  id: string;
+  issued_card_id: string;
+  event_id: string;
+  merchant_name: string;
+  category: SpendCategory;
+  amount_cents: number;
+  decision: AuthDecision;
+  reason: string;
+  created_at: string;
+}
